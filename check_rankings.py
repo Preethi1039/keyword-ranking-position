@@ -80,9 +80,14 @@ def norm_url(u):
 
 
 def fetch_results(keyword, cfg, api_key):
-    """Return the ordered list of organic result URLs (live Google SERP)."""
-    links, page = [], 1
-    while len(links) < cfg["max_position"]:
+    """Return (ordered organic URLs, raw log) from the live Google SERP.
+
+    The raw log keeps, for every page requested, how many results came back
+    and each result's link/title/position as reported by the API, so every
+    position in the report can be audited later.
+    """
+    links, page, log = [], 1, []
+    while len(links) < cfg["max_position"] and page <= 10:
         payload = {"q": keyword, "gl": cfg["country_code"], "hl": cfg["language"],
                    "num": 100, "page": page}
         if cfg.get("location"):
@@ -94,14 +99,21 @@ def fetch_results(keyword, cfg, api_key):
                 break
             time.sleep(5 * (attempt + 1))
         r.raise_for_status()
-        organic = r.json().get("organic", [])
+        data = r.json()
+        organic = [o for o in data.get("organic", []) if o.get("link")]
+        log.append({"page": page, "returned": len(organic),
+                    "results": [{"pos_api": o.get("position"), "link": o["link"],
+                                 "title": o.get("title", "")} for o in organic]})
         if not organic:
             break
-        links.extend(o["link"] for o in organic if o.get("link"))
+        new = [o["link"] for o in organic if o["link"] not in links]
+        if not new:
+            break  # API repeated the same results: stop instead of double counting
+        links.extend(new)
         if len(organic) < 10:
             break
         page += 1
-    return links[: cfg["max_position"]]
+    return links[: cfg["max_position"]], log
 
 
 def find_position(links, domain):
@@ -161,14 +173,16 @@ def main():
     prev = previous_positions(out)
     maxp = cfg["max_position"]
 
-    rows, failed = [], 0
+    rows, failed, raw = [], 0, {}
     for i, (cat, kw, target) in enumerate(items, 1):
         try:
-            links = fetch_results(kw, cfg, api_key)
+            links, log = fetch_results(kw, cfg, api_key)
+            raw[kw] = {"category": cat, "checked": len(links), "pages": log}
             pos, url = find_position(links, domain)
-            shown, status = (pos if pos else f">{maxp}"), "OK"
+            shown, status = (pos if pos else f">{len(links)}"), "OK"
         except Exception as e:  # keep going; record the failure honestly
             pos, url, shown, status = None, "", "Not checked", f"Error: {e}"
+            links = []
             failed += 1
         right_page = ""
         if url and target:
@@ -182,7 +196,7 @@ def main():
         elif pos is None and isinstance(old, int) and status == "OK":
             change = "Lost"
         rows.append([today, cat, kw, shown, "" if old is None else old, change,
-                     right_page, url, target, status])
+                     right_page, url, target, status, len(links)])
         print(f"[{i}/{len(items)}] {cat} | {kw}: {shown}")
         time.sleep(0.5)
 
@@ -204,8 +218,9 @@ def main():
                      [12, 20, 45, 10, 70, 20])
 
     write_header(latest, ["Date", "Category", "Keyword", "Position", "Previous", "Change",
-                          "Correct page?", "Ranking URL (Google)", "Target page", "Status"],
-                 [12, 20, 45, 10, 10, 10, 16, 70, 70, 20])
+                          "Correct page?", "Ranking URL (Google)", "Target page", "Status",
+                          "Results checked"],
+                 [12, 20, 45, 10, 10, 10, 16, 70, 70, 20, 12])
     for r in rows:
         latest.append(r)
         n = latest.max_row
@@ -242,10 +257,17 @@ def main():
             for c in summary[summary.max_row]:
                 c.font = Font(bold=True)
     summary.append([])
+    summary.append([f"Positions are counted among normal (organic) Google results only - ads, map box, "
+                    f"'People also ask' and AI answers are not counted. '>{maxp}' = not found in the top {maxp}. "
+                    "Raw Google results for every keyword are saved in results/raw/<date>.json."])
     summary.append(["Top N columns are cumulative (Top 10 includes Top 3). "
                     "'Wrong page ranking' = Google ranks a different abhasa.in page than the target page."])
 
     wb.save(out)
+    raw_dir = os.path.join(os.path.dirname(out), "raw")
+    os.makedirs(raw_dir, exist_ok=True)
+    with open(os.path.join(raw_dir, f"{today}.json"), "w", encoding="utf-8") as f:
+        json.dump(raw, f, ensure_ascii=False, indent=1)
     print(f"Done: {len(items)} keywords, {failed} not checked. Saved {out}")
 
 
