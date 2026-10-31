@@ -1,0 +1,26 @@
+name: Diagnose rankings
+on:
+  push:
+    paths: ["diag/diagnose.py"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  diag:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - env:
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+        run: python diag/diagnose.py
+      - run: |
+          git config user.name "rank-bot"
+          git config user.email "rank-bot@users.noreply.github.com"
+          git add diag/output
+          git commit -m "Diagnostic output" || echo "No changes"
+          git pull --rebase
+          git push
