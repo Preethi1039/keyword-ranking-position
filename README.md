@@ -31,3 +31,15 @@ After that it runs automatically every Monday morning (IST).
 keyword – nothing is ever estimated.
 
 To change the day/time, edit the `cron` line in `.github/workflows/weekly-rank-check.yml`.
+
+## How positions are counted
+- Google is read page by page, 10 results per page, up to `max_position` (100).
+  Position = (page - 1) x 10 + place on the page - the same number a person counts.
+- Only normal (organic) results count: ads, the map box, "People also ask" and
+  AI Overviews are not counted.
+- Google sometimes hides a result's address behind a `google.com/goto` link; the
+  tracker then identifies the site from the address Google displays under the title.
+  For those rows "Correct page?" says "Can't tell" and the title is shown instead.
+- Searching stops as soon as your domain is found, so well-ranked keywords cost
+  1-2 searches; keywords not in the top 100 cost 10.
+- Raw Google results behind every number: `results/raw/<date>.json`.

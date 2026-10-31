@@ -67,9 +67,24 @@ def clean_domain(d):
     return d[4:] if d.startswith("www.") else d
 
 
-def host_matches(link, domain):
-    host = urlparse(link).netloc.lower()
-    host = host[4:] if host.startswith("www.") else host
+def bare_host(h):
+    h = h.strip().lower()
+    return h[4:] if h.startswith("www.") else h
+
+
+def result_host(o):
+    """Real website of a result. Google sometimes hides the URL behind a
+    google.com/goto?url=... redirect; the site is then only visible in the
+    'displayedLink' breadcrumb (e.g. 'https://www.abhasa.in › ocd › ...')."""
+    host = bare_host(urlparse(o.get("link", "")).netloc)
+    if host.endswith("google.com") and "/goto" in o.get("link", ""):
+        shown = o.get("displayedLink", "").split("›")[0].strip()
+        if shown:
+            return bare_host(urlparse(shown if "://" in shown else "https://" + shown).netloc)
+    return host
+
+
+def host_matches(host, domain):
     return host == domain or host.endswith("." + domain)
 
 
@@ -79,48 +94,43 @@ def norm_url(u):
     return host + p.path.rstrip("/")
 
 
-def fetch_results(keyword, cfg, api_key):
-    """Return (ordered organic URLs, raw log) from the live Google SERP.
+def fetch_page(keyword, page, cfg, api_key):
+    payload = {"q": keyword, "gl": cfg["country_code"], "hl": cfg["language"],
+               "num": 10, "page": page}
+    if cfg.get("location"):
+        payload["location"] = cfg["location"]
+    for attempt in range(3):
+        r = requests.post(API_URL, json=payload, timeout=60,
+                          headers={"X-API-KEY": api_key, "Content-Type": "application/json"})
+        if r.status_code == 200:
+            break
+        time.sleep(5 * (attempt + 1))
+    r.raise_for_status()
+    return [o for o in r.json().get("organic", []) if o.get("link")]
 
-    The raw log keeps, for every page requested, how many results came back
-    and each result's link/title/position as reported by the API, so every
-    position in the report can be audited later.
+
+def find_ranking(keyword, domain, cfg, api_key):
+    """Walk Google result pages (10 per page, as Google serves them) until the
+    domain is found or max_position is reached.
+
+    Returns (position, result_dict_or_None, results_checked, raw_log).
+    Position = (page - 1) * 10 + place on that page, i.e. what a person sees.
     """
-    links, page, log = [], 1, []
-    while len(links) < cfg["max_position"] and page <= 10:
-        payload = {"q": keyword, "gl": cfg["country_code"], "hl": cfg["language"],
-                   "num": 100, "page": page}
-        if cfg.get("location"):
-            payload["location"] = cfg["location"]
-        for attempt in range(3):
-            r = requests.post(API_URL, json=payload, timeout=60,
-                              headers={"X-API-KEY": api_key, "Content-Type": "application/json"})
-            if r.status_code == 200:
-                break
-            time.sleep(5 * (attempt + 1))
-        r.raise_for_status()
-        data = r.json()
-        organic = [o for o in data.get("organic", []) if o.get("link")]
+    log, checked = [], 0
+    for page in range(1, cfg["max_position"] // 10 + 1):
+        organic = fetch_page(keyword, page, cfg, api_key)
         log.append({"page": page, "returned": len(organic),
-                    "results": [{"pos_api": o.get("position"), "link": o["link"],
+                    "results": [{"pos": o.get("position"), "site": result_host(o),
+                                 "link": o["link"], "displayed": o.get("displayedLink", ""),
                                  "title": o.get("title", "")} for o in organic]})
         if not organic:
             break
-        new = [o["link"] for o in organic if o["link"] not in links]
-        if not new:
-            break  # API repeated the same results: stop instead of double counting
-        links.extend(new)
-        if len(organic) < 10:
-            break
-        page += 1
-    return links[: cfg["max_position"]], log
-
-
-def find_position(links, domain):
-    for pos, link in enumerate(links, start=1):
-        if host_matches(link, domain):
-            return pos, link
-    return None, ""
+        checked = (page - 1) * 10 + len(organic)
+        for i, o in enumerate(organic, start=1):
+            if host_matches(result_host(o), domain):
+                return (page - 1) * 10 + i, o, checked, log
+        time.sleep(0.3)
+    return None, None, checked, log
 
 
 def previous_positions(path):
@@ -176,17 +186,23 @@ def main():
     rows, failed, raw = [], 0, {}
     for i, (cat, kw, target) in enumerate(items, 1):
         try:
-            links, log = fetch_results(kw, cfg, api_key)
-            raw[kw] = {"category": cat, "checked": len(links), "pages": log}
-            pos, url = find_position(links, domain)
-            shown, status = (pos if pos else f">{len(links)}"), "OK"
+            pos, hit, checked, log = find_ranking(kw, domain, cfg, api_key)
+            raw[kw] = {"category": cat, "position": pos, "checked": checked, "pages": log}
+            url = ""
+            if hit:
+                hidden = "/goto" in hit["link"] and "google.com" in hit["link"]
+                url = (f"{hit.get('displayedLink', '')}  [title: {hit.get('title', '')}]"
+                       if hidden else hit["link"])
+            shown, status = (pos if pos else f">{checked}"), "OK"
         except Exception as e:  # keep going; record the failure honestly
-            pos, url, shown, status = None, "", "Not checked", f"Error: {e}"
-            links = []
+            pos, hit, url, shown, status, checked = None, None, "", "Not checked", f"Error: {e}", 0
             failed += 1
         right_page = ""
-        if url and target:
-            right_page = "Yes" if norm_url(url) == norm_url(target) else "No - other page"
+        if hit and target:
+            if url.startswith("http") and "[title:" not in url:
+                right_page = "Yes" if norm_url(url) == norm_url(target) else "No - other page"
+            else:
+                right_page = "Can't tell (Google hid URL)"
         old = prev.get((cat, kw))
         change = ""
         if isinstance(pos, int) and isinstance(old, int):
@@ -196,7 +212,7 @@ def main():
         elif pos is None and isinstance(old, int) and status == "OK":
             change = "Lost"
         rows.append([today, cat, kw, shown, "" if old is None else old, change,
-                     right_page, url, target, status, len(links)])
+                     right_page, url, target, status, checked])
         print(f"[{i}/{len(items)}] {cat} | {kw}: {shown}")
         time.sleep(0.5)
 
