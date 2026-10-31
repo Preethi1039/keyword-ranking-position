@@ -1,0 +1,10 @@
+{
+  "domain": "yourwebsite.com",
+  "competitors": [],
+  "location": "Chennai, Tamil Nadu, India",
+  "country_code": "in",
+  "language": "en",
+  "max_position": 100,
+  "keywords_file": "data/keywords.xlsx",
+  "output_file": "results/rankings.xlsx"
+}
