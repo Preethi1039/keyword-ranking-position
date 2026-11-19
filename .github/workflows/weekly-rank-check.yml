@@ -6,7 +6,7 @@ on:
   workflow_dispatch:        # "Run workflow" button for a manual run
   push:                     # also re-check when the keywords, settings or code change
     branches: [main]
-    paths: ["data/**", "config.json", "check_rankings.py"]
+    paths: ["data/**", "config.json", "check_rankings.py", "validate_report.py"]
 
 permissions:
   contents: write
@@ -29,6 +29,9 @@ jobs:
         env:
           SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
         run: python check_rankings.py
+
+      - name: Validate report against raw Google data (strict rules)
+        run: python validate_report.py
 
       - name: Save results to the repo
         run: |

@@ -13,7 +13,7 @@ import json
 import os
 import sys
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from urllib.parse import urlparse
 
 import requests
@@ -105,7 +105,8 @@ def fetch_page(keyword, page, cfg, api_key):
         if r.status_code == 200:
             break
         time.sleep(5 * (attempt + 1))
-    r.raise_for_status()
+    if r.status_code != 200:
+        raise RuntimeError(f"Serper HTTP {r.status_code}: {r.text[:200]}")
     return [o for o in r.json().get("organic", []) if o.get("link")]
 
 
@@ -170,52 +171,7 @@ def bucket(pos):
     return None
 
 
-def main():
-    api_key = os.environ.get("SERPER_API_KEY")
-    if not api_key:
-        sys.exit("SERPER_API_KEY is not set.")
-    cfg = load_config()
-    domain = clean_domain(cfg["domain"])
-    items = load_keywords(cfg["keywords_file"])
-    out = cfg["output_file"]
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    today = date.today().isoformat()
-    prev = previous_positions(out)
-    maxp = cfg["max_position"]
-
-    rows, failed, raw = [], 0, {}
-    for i, (cat, kw, target) in enumerate(items, 1):
-        try:
-            pos, hit, checked, log = find_ranking(kw, domain, cfg, api_key)
-            raw[kw] = {"category": cat, "position": pos, "checked": checked, "pages": log}
-            url = ""
-            if hit:
-                hidden = "/goto" in hit["link"] and "google.com" in hit["link"]
-                url = (f"{hit.get('displayedLink', '')}  [title: {hit.get('title', '')}]"
-                       if hidden else hit["link"])
-            shown, status = (pos if pos else f">{checked}"), "OK"
-        except Exception as e:  # keep going; record the failure honestly
-            pos, hit, url, shown, status, checked = None, None, "", "Not checked", f"Error: {e}", 0
-            failed += 1
-        right_page = ""
-        if hit and target:
-            if url.startswith("http") and "[title:" not in url:
-                right_page = "Yes" if norm_url(url) == norm_url(target) else "No - other page"
-            else:
-                right_page = "Can't tell (Google hid URL)"
-        old = prev.get((cat, kw))
-        change = ""
-        if isinstance(pos, int) and isinstance(old, int):
-            change = old - pos  # positive = moved up
-        elif isinstance(pos, int) and old is not None:
-            change = "New"
-        elif pos is None and isinstance(old, int) and status == "OK":
-            change = "Lost"
-        rows.append([today, cat, kw, shown, "" if old is None else old, change,
-                     right_page, url, target, status, checked])
-        print(f"[{i}/{len(items)}] {cat} | {kw}: {shown}")
-        time.sleep(0.5)
-
+def write_report(cfg, rows, out, today, domain, maxp):
     if os.path.exists(out):
         wb = load_workbook(out)
         for name in ("Summary", "Latest"):
@@ -275,14 +231,73 @@ def main():
     summary.append([])
     summary.append([f"Positions are counted among normal (organic) Google results only - ads, map box, "
                     f"'People also ask' and AI answers are not counted. '>{maxp}' = not found in the top {maxp}. "
-                    "Raw Google results for every keyword are saved in results/raw/<date>.json."])
+                    "Raw Google results for every keyword are saved in results/raw/<date_time>.json."])
     summary.append(["Top N columns are cumulative (Top 10 includes Top 3). "
                     "'Wrong page ranking' = Google ranks a different abhasa.in page than the target page."])
 
     wb.save(out)
+
+
+def main():
+    api_key = os.environ.get("SERPER_API_KEY")
+    if not api_key:
+        sys.exit("SERPER_API_KEY is not set.")
+    cfg = load_config()
+    domain = clean_domain(cfg["domain"])
+    items = load_keywords(cfg["keywords_file"])
+    out = cfg["output_file"]
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    today = date.today().isoformat()
+    prev = previous_positions(out)
+    maxp = cfg["max_position"]
+
+    rows, failed, raw = [], 0, {}
+    for i, (cat, kw, target) in enumerate(items, 1):
+        try:
+            pos, hit, checked, log = find_ranking(kw, domain, cfg, api_key)
+            raw[kw] = {"category": cat, "position": pos, "checked": checked, "pages": log}
+            url = ""
+            if hit:
+                hidden = "/goto" in hit["link"] and "google.com" in hit["link"]
+                url = (f"{hit.get('displayedLink', '')}  [title: {hit.get('title', '')}]"
+                       if hidden else hit["link"])
+            shown, status = (pos if pos else f">{checked}"), "OK"
+        except Exception as e:  # keep going; record the failure honestly
+            pos, hit, url, shown, status, checked = None, None, "", "Not checked", f"Error: {e}", 0
+            failed += 1
+            if failed >= 3 and failed == i:  # first keywords all failed: API key/credits problem
+                sys.exit(f"Stopped: the first {failed} keywords all failed ({e}). "
+                         "Nothing was saved. Check the Serper API key and remaining credits.")
+        right_page = ""
+        if hit and target:
+            if url.startswith("http") and "[title:" not in url:
+                right_page = "Yes" if norm_url(url) == norm_url(target) else "No - other page"
+            else:
+                right_page = "Can't tell (Google hid URL)"
+        old = prev.get((cat, kw))
+        change = ""
+        if isinstance(pos, int) and isinstance(old, int):
+            change = old - pos  # positive = moved up
+        elif isinstance(pos, int) and old is not None:
+            change = "New"
+        elif pos is None and isinstance(old, int) and status == "OK":
+            change = "Lost"
+        rows.append([today, cat, kw, shown, "" if old is None else old, change,
+                     right_page, url, target, status, checked])
+        print(f"[{i}/{len(items)}] {cat} | {kw}: {shown}")
+        time.sleep(0.5)
+
+    max_fail = cfg.get("max_failed_keywords", 3)
+    if failed > max_fail:
+        sys.exit(f"Run rejected: {failed} of {len(items)} keywords could not be checked "
+                 f"(limit {max_fail}). The previous report was kept unchanged. "
+                 f"Last error: {next(r[9] for r in reversed(rows) if r[9] != 'OK')}")
+
+    write_report(cfg, rows, out, today, domain, maxp)
     raw_dir = os.path.join(os.path.dirname(out), "raw")
     os.makedirs(raw_dir, exist_ok=True)
-    with open(os.path.join(raw_dir, f"{today}.json"), "w", encoding="utf-8") as f:
+    run_id = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M")
+    with open(os.path.join(raw_dir, f"{run_id}.json"), "w", encoding="utf-8") as f:
         json.dump(raw, f, ensure_ascii=False, indent=1)
     print(f"Done: {len(items)} keywords, {failed} not checked. Saved {out}")
 

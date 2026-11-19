@@ -42,4 +42,15 @@ To change the day/time, edit the `cron` line in `.github/workflows/weekly-rank-c
   For those rows "Correct page?" says "Can't tell" and the title is shown instead.
 - Searching stops as soon as your domain is found, so well-ranked keywords cost
   1-2 searches; keywords not in the top 100 cost 10.
-- Raw Google results behind every number: `results/raw/<date>.json`.
+- Raw Google results behind every number: `results/raw/<date_time>.json`.
+
+## Safety and validation (every run)
+- If the first 3 keywords fail (bad API key / no credits) the run stops at once.
+- If more than `max_failed_keywords` (3) keywords fail, the run is rejected and
+  the previous report is kept unchanged (the run shows a red X).
+- `validate_report.py` then re-derives every position from the raw Google data,
+  independently of the tracker code, and checks 10 strict rules (all keywords
+  present and checked, position = page x 10 + place, hidden links resolved,
+  '>N' only when truly absent, full depth searched, page order, ranking URL,
+  correct-page flag, previous/change). Any failure = red X, nothing saved or emailed.
+- Check any past run: `python validate_report.py <run number>`.
